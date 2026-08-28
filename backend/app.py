@@ -6,7 +6,7 @@ import unicodedata
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Query
+from fastapi import Body, FastAPI, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
@@ -77,6 +77,7 @@ def load_data():
     projects["Completed Date"] = projects["Work ID"].map(completed_by_id["Completed Date"])
     projects["completed"] = projects["Work ID"].isin(completed_by_id.index)
     projects["Expenditure"] = projects["Work ID"].map(expenditure_by_id(expenditures, projects, expenditure_amount)).fillna(0)
+    projects["Payment Status"] = projects["Work ID"].map(expenditure_status_by_id(expenditures, projects)).fillna("Not available")
     projects["variance"] = np.where(projects["Recommended Amount (INR)"] > 0, (projects["Final Amount"] - projects["Recommended Amount (INR)"]) / projects["Recommended Amount (INR)"], 0)
     projects["duration"] = (projects["Completed Date"] - projects["Recommendation Date"]).dt.days
     projects["risk_score"], projects["risk_reasons"] = score_projects(projects, expenditures)
@@ -89,6 +90,14 @@ def expenditure_by_id(exp, projects, expenditure_amount):
     for frame in [exp, projects]:
         frame["match_key"] = frame[keys].fillna("").astype(str).apply(lambda row: "|".join(clean_text(x).lower() for x in row), axis=1)
     return exp.groupby("match_key")["Expenditure Amount (INR)"].sum().rename(index=lambda x: x)
+
+def expenditure_status_by_id(exp, projects):
+    keys = ["MP Name", "Constituency", "State", "Work Description"]
+    exp = exp.copy()
+    project_keys = projects[keys].fillna("").astype(str).apply(lambda row: "|".join(clean_text(x).lower() for x in row), axis=1)
+    exp["match_key"] = exp[keys].fillna("").astype(str).apply(lambda row: "|".join(clean_text(x).lower() for x in row), axis=1)
+    statuses = exp.groupby("match_key")["Payment Status"].agg(lambda values: ", ".join(sorted(set(str(value) for value in values if str(value).strip()))))
+    return pd.Series(project_keys.map(statuses).values, index=projects.index)
 
 def score_projects(projects, expenditures):
     amount = projects["Recommended Amount (INR)"].replace(0, np.nan)
@@ -114,6 +123,7 @@ def score_projects(projects, expenditures):
     return scores, reasons
 
 DATA = load_data()
+ALERT_STATE = {}
 app = FastAPI(title="MPLADS AI Monitor", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -121,7 +131,10 @@ def num(value):
     return round(float(value or 0), 2)
 
 def project_json(row):
-    return {"work_id": str(row["Work ID"]), "description": clean_text(row.get("Work Description")), "category": clean_text(row.get("Category")) or "Not available", "mp": clean_text(row.get("MP Name")), "constituency": clean_text(row.get("Constituency")), "state": clean_text(row.get("State")), "recommended": num(row.get("Recommended Amount (INR)")), "final": num(row.get("Final Amount")), "expenditure": num(row.get("Expenditure")), "recommendation_date": date_json(row.get("Recommendation Date")), "completed_date": date_json(row.get("Completed Date")), "status": "Completed" if row.get("completed") else "Recommended", "risk_score": int(row.get("risk_score", 0)), "risk_level": row.get("risk_level", "Low"), "reasons": row.get("risk_reasons", [])}
+    recommended = num(row.get("Recommended Amount (INR)"))
+    expenditure = num(row.get("Expenditure"))
+    variance = num(row.get("variance"))
+    return {"work_id": str(row["Work ID"]), "description": clean_text(row.get("Work Description")), "category": clean_text(row.get("Category")) or "Not available", "mp": clean_text(row.get("MP Name")), "constituency": clean_text(row.get("Constituency")), "state": clean_text(row.get("State")), "recommended": recommended, "final": num(row.get("Final Amount")), "expenditure": expenditure, "remaining_budget": num(recommended - expenditure), "variance_percentage": num(variance * 100), "recommendation_date": date_json(row.get("Recommendation Date")), "completed_date": date_json(row.get("Completed Date")), "payment_status": clean_text(row.get("Payment Status")) or "Not available", "status": "Completed" if row.get("completed") else "Recommended", "risk_score": int(row.get("risk_score", 0)), "risk_level": row.get("risk_level", "Low"), "reasons": row.get("risk_reasons", [])}
 
 def date_json(value):
     return value.isoformat()[:10] if pd.notna(value) else None
@@ -131,7 +144,7 @@ def filtered_projects(state="all", risk="all", search=""):
     if state != "all": frame = frame[frame["State"].astype(str) == state]
     if risk != "all": frame = frame[frame["risk_level"] == risk]
     if search:
-        text = frame.fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+        text = frame.fillna("").apply(lambda row: " ".join(str(value) for value in row), axis=1).str.lower()
         frame = frame[text.str.contains(search.lower(), regex=False)]
     return frame
 
@@ -169,9 +182,41 @@ def project(work_id: str):
     return result
 
 @app.get("/api/alerts")
-def alerts():
-    p = DATA["projects"].sort_values("risk_score", ascending=False).head(30)
-    return [{"id": f"ALT-{r['Work ID']}", "work_id": str(r["Work ID"]), "type": "Potential irregularity", "severity": r["risk_level"], "score": int(r["risk_score"]), "explanation": r["risk_reasons"][0], "status": "New", "action": "Review available financial and completion records"} for _, r in p[p["risk_score"] >= 50].iterrows()]
+def alerts(state: str = "all", risk: str = "all", search: str = ""):
+    p = filtered_projects(state, risk, search)
+    p = p[p["risk_score"] >= 50].copy()
+    p["risk_order"] = p["risk_level"].map({"High": 0, "Medium": 1, "Low": 2}).fillna(3)
+    p = p.sort_values(["State", "risk_order", "risk_score"], ascending=[True, True, False]).head(100)
+    return [alert_json(r) for _, r in p.iterrows()]
+
+def alert_json(row):
+    work_id = str(row["Work ID"])
+    saved = ALERT_STATE.get(work_id, {})
+    return {"id": f"ALT-{work_id}", "work_id": work_id, "state": clean_text(row["State"]), "type": "Potential irregularity", "severity": row["risk_level"], "score": int(row["risk_score"]), "explanation": row["risk_reasons"][0], "status": saved.get("status", "New"), "assigned_to": saved.get("assigned_to", ""), "note": saved.get("note", ""), "action": "Review available financial and completion records"}
+
+@app.post("/api/alerts/{alert_id}/action")
+def alert_action(alert_id: str, payload: dict = Body(default={})): 
+    work_id = alert_id.removeprefix("ALT-")
+    if work_id not in DATA["projects"]["Work ID"].astype(str).values:
+        return {"error": "Alert not found"}
+    action = payload.get("action", "review")
+    status = "Dismissed" if action == "dismiss" else "Reviewed" if action == "review" else "New"
+    ALERT_STATE[work_id] = {"status": status, "assigned_to": str(payload.get("assigned_to", "")).strip(), "note": str(payload.get("note", "")).strip()}
+    return {"status": status, "assigned_to": ALERT_STATE[work_id]["assigned_to"], "note": ALERT_STATE[work_id]["note"]}
+
+@app.get("/api/analytics")
+def analytics():
+    projects = DATA["projects"].copy()
+    projects["year"] = projects["Recommendation Date"].dt.year.fillna(0).astype(int)
+    yearly = projects[projects["year"] > 0].groupby("year").agg(works=("Work ID", "count"), completed=("completed", "sum"), recommended=("Recommended Amount (INR)", "sum"), expenditure=("Expenditure", "sum")).reset_index()
+    states = DATA["expenditures"].groupby("State")["Expenditure Amount (INR)"].sum().sort_values(ascending=False).head(10).reset_index()
+    categories = projects.groupby("Category").agg(recommended=("Recommended Amount (INR)", "sum"), expenditure=("Expenditure", "sum"), works=("Work ID", "count")).sort_values("recommended", ascending=False).head(10).reset_index()
+    allocated = DATA["allocated"].groupby("State")["Allocated Amount (INR)"].sum()
+    spent = DATA["expenditures"].groupby("State")["Expenditure Amount (INR)"].sum()
+    utilization = pd.DataFrame({"allocated": allocated, "expenditure": spent}).fillna(0).reset_index()
+    utilization["utilization"] = np.where(utilization["allocated"] > 0, utilization["expenditure"] / utilization["allocated"] * 100, 0)
+    risk_trends = projects.groupby(["year", "risk_level"]).size().reset_index(name="value")
+    return {"yearly": yearly.to_dict("records"), "states": [{"state": clean_text(r["State"]), "expenditure": num(r["Expenditure Amount (INR)"])} for _, r in states.iterrows()], "categories": [{"category": clean_text(r["Category"]) or "Not available", "recommended": num(r["recommended"]), "expenditure": num(r["expenditure"]), "works": int(r["works"])} for _, r in categories.iterrows()], "utilization": [{"state": clean_text(r["State"]), "allocated": num(r["allocated"]), "expenditure": num(r["expenditure"]), "utilization": num(r["utilization"])} for _, r in utilization.sort_values("expenditure", ascending=False).head(10).iterrows()], "risk_trends": [{"year": int(r["year"]), "risk": r["risk_level"], "value": int(r["value"])} for _, r in risk_trends[risk_trends["year"] > 0].iterrows()]}
 
 @app.get("/api/data-quality")
 def quality():
