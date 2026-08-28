@@ -1,0 +1,2153 @@
+BUILD THIS APPLICATION:
+
+# MPLADS AI Monitor
+
+Team: CodeDev's
+
+Tagline:
+"Smarter Monitoring. Earlier Detection. Better Accountability."
+
+==================================================
+1. PROJECT OBJECTIVE
+==================================================
+
+Build a complete AI-powered monitoring and analytics platform for MPLADS (Members of Parliament Local Area Development Scheme).
+
+The platform will analyze MPLADS work, expenditure, recommendation, completion, MP allocation, payment, and financial summary data to identify:
+
+- unusual expenditure patterns
+- financial anomalies
+- potential cost overruns
+- unusual vendor/payment behavior
+- potential duplicate works
+- unusual work descriptions
+- abnormal completion patterns
+- low/high fund utilization
+- compliance concerns
+- high-risk projects/records
+- state/district/constituency trends
+
+The system is a DECISION-SUPPORT SYSTEM.
+
+It must NEVER claim that a person or organization committed fraud merely because an ML model flags something.
+
+Use language such as:
+
+"Potential irregularity"
+"Anomaly detected"
+"Requires review"
+"Potential duplicate"
+"Unusual expenditure pattern"
+"High-risk record"
+
+Never automatically display:
+
+"Fraud confirmed"
+"Corrupt contractor"
+"Fraudulent MP"
+
+unless an authorized human investigator explicitly enters such a verified finding.
+
+==================================================
+2. IMPORTANT: REAL DATASET
+==================================================
+
+I already have real MPLADS datasets.
+
+The current source files are:
+
+1. mplads_recommended_works
+2. mplads_completed_works
+3. mplads_expenditures
+4. mplads_mp_summary
+5. Allocated Limit for Honble MPs
+
+These datasets were collected from an alternative source because the MPLADS source link provided for the project was not working reliably.
+
+DO NOT invent a completely different dataset structure.
+
+Design the application around these actual datasets.
+
+The real datasets currently contain approximately:
+
+- Recommended Works: 83,797 records
+- Completed Works: 43,667 records
+- Expenditures: 107,551 records
+- MP Summary: 774 records
+- Allocated Limits: 544 records
+
+These numbers are provided as approximate current dataset sizes. Always calculate actual counts from the database instead of hardcoding these numbers.
+
+==================================================
+3. ACTUAL DATA STRUCTURE
+==================================================
+
+IMPORTANT:
+
+The exact column names may vary slightly in the uploaded CSV files.
+
+The application must inspect/import the uploaded files and map their columns into standardized database fields.
+
+Do NOT assume unavailable fields such as:
+
+- latitude
+- longitude
+- progress percentage
+- expected completion date
+- contractor ID
+- sanction date
+
+unless they actually exist in the uploaded data.
+
+If a field is unavailable:
+
+- do not fabricate it
+- do not create fake values
+- show "Not available" where appropriate
+- keep the architecture extensible so the field can be added later
+
+==================================================
+4. RECOMMENDED WORKS DATA
+==================================================
+
+The recommended works dataset contains fields around:
+
+- Work ID
+- Work Description
+- Category
+- MP Name
+- Constituency
+- State
+- Recommended Amount
+- Recommendation Date
+
+Use this dataset to represent the beginning of the work lifecycle.
+
+Standardized table:
+
+recommended_works
+
+Suggested fields:
+
+- id
+- work_id
+- work_description
+- category
+- mp_name
+- constituency
+- state
+- recommended_amount
+- recommendation_date
+- source_file
+- imported_at
+
+==================================================
+5. COMPLETED WORKS DATA
+==================================================
+
+The completed works dataset contains fields around:
+
+- Work ID
+- Work Description
+- Category
+- MP Name
+- Constituency
+- State
+- Final Amount
+- Completed Date
+- Images/photo information where available
+
+Standardized table:
+
+completed_works
+
+Suggested fields:
+
+- id
+- work_id
+- work_description
+- category
+- mp_name
+- constituency
+- state
+- final_amount
+- completed_date
+- image_reference
+- source_file
+- imported_at
+
+The Work ID should be treated as the primary matching key whenever available.
+
+==================================================
+6. EXPENDITURE DATA
+==================================================
+
+The expenditure dataset contains fields around:
+
+- MP Name
+- Constituency
+- State
+- House
+- Work Description
+- Vendor
+- IDA
+- Expenditure Amount
+- Expenditure Date
+- Payment Status
+
+Standardized table:
+
+expenditures
+
+Suggested fields:
+
+- id
+- mp_name
+- constituency
+- state
+- house
+- work_description
+- vendor
+- ida
+- expenditure_amount
+- expenditure_date
+- payment_status
+- source_file
+- imported_at
+
+IMPORTANT:
+
+The expenditure dataset currently does NOT reliably contain Work ID.
+
+Therefore DO NOT pretend expenditure records can always be joined directly to a work using Work ID.
+
+Create an "entity matching" layer that can match expenditure records to works using:
+
+- Work Description
+- MP Name
+- Constituency
+- State
+- IDA
+- Category where available
+- amount similarity where appropriate
+- date proximity where appropriate
+
+Use exact matching where possible.
+
+Use fuzzy/NLP matching where exact matching is unavailable.
+
+Store:
+
+- matched_work_id
+- matching_method
+- matching_confidence
+
+Example:
+
+matching_method:
+"TF-IDF + metadata matching"
+
+matching_confidence:
+0.91
+
+If confidence is low, mark:
+
+"Needs review"
+
+==================================================
+7. MP SUMMARY DATA
+==================================================
+
+The MP summary dataset contains aggregated information such as:
+
+- MP
+- State
+- Constituency
+- allocated amount
+- expenditure
+- utilization percentage
+- completed works
+- recommended works
+- payment/transaction statistics
+
+Use this dataset to support high-level dashboard analytics.
+
+Table:
+
+mp_summary
+
+Do not duplicate data unnecessarily if it can be dynamically calculated from normalized records.
+
+Where possible, use calculated values from underlying records and use the summary file as a validation/reference source.
+
+==================================================
+8. ALLOCATED LIMIT DATA
+==================================================
+
+The allocated limit dataset contains:
+
+- Serial number
+- State
+- Hon'ble Member of Parliament
+- Constituency
+- Allocated Amount
+
+Create:
+
+allocated_limits
+
+Use it for:
+
+- MP allocation
+- constituency allocation
+- state allocation
+- allocation comparisons
+- fund utilization context
+
+==================================================
+9. CORE DATA MODEL
+==================================================
+
+Use PostgreSQL/Supabase.
+
+Create relational tables.
+
+Main tables:
+
+users
+states
+districts where available
+constituencies
+recommended_works
+completed_works
+expenditures
+mp_summary
+allocated_limits
+work_entity_matches
+risk_scores
+anomalies
+duplicate_candidates
+payment_anomalies
+compliance_checks
+compliance_rules
+alerts
+investigations
+audit_logs
+ml_runs
+data_imports
+
+Do not create unnecessary fields that cannot be populated from real data.
+
+==================================================
+10. TECHNOLOGY
+==================================================
+
+Frontend:
+
+React
+TypeScript
+Tailwind CSS
+shadcn/ui
+React Router
+Recharts
+Lucide icons
+
+Backend:
+
+Python
+FastAPI
+Pandas
+NumPy
+Scikit-learn
+
+Database:
+
+Supabase PostgreSQL
+
+Authentication:
+
+Supabase Auth
+
+Map:
+
+Leaflet + OpenStreetMap
+
+ML:
+
+Python-based ML services exposed through FastAPI.
+
+IMPORTANT:
+
+The frontend must NOT perform the actual ML computations.
+
+Architecture:
+
+React/Lovable frontend
+        ↓
+FastAPI
+        ↓
+Python ML pipeline
+        ↓
+Supabase/PostgreSQL
+
+==================================================
+11. AUTHENTICATION
+==================================================
+
+Create secure login.
+
+Roles:
+
+1. MP
+2. District Authority
+3. State Nodal Authority
+4. Ministry/Admin
+
+Users must NOT select their own role during login.
+
+Role must come from the authenticated user profile/database.
+
+Use Supabase authentication.
+
+Use Row Level Security.
+
+==================================================
+12. ROLE ACCESS
+==================================================
+
+MP:
+
+Can see only relevant constituency/project information.
+
+Can view:
+
+- dashboard
+- projects
+- project details
+- financial analytics
+- fund utilization
+- alerts relevant to them
+- map
+- reports
+
+District Authority:
+
+Can see relevant district records.
+
+Can:
+
+- review alerts
+- acknowledge alerts
+- assign investigations
+- add investigation notes
+- resolve/dismiss alerts
+- view district analytics
+- view project details
+- view expenditure/payment anomalies
+
+State Nodal Authority:
+
+Can view state-level and district-level information.
+
+Can:
+
+- compare districts
+- view state analytics
+- view high-risk projects
+- review compliance
+- monitor fund utilization
+- review alerts
+
+Ministry/Admin:
+
+Full access.
+
+Can:
+
+- see national dashboard
+- manage users
+- import data
+- run ML analysis
+- configure thresholds
+- view all alerts
+- view audit logs
+- manage compliance rules
+- generate reports
+
+==================================================
+13. MAIN UI
+==================================================
+
+Create a professional modern government analytics interface.
+
+Design style:
+
+- clean
+- modern
+- professional
+- trustworthy
+- minimal
+- lightweight
+- responsive
+
+Do NOT make it overly stylish.
+
+Avoid:
+
+- excessive gradients
+- heavy animations
+- unnecessary 3D
+- glassmorphism everywhere
+- huge visual effects
+- unnecessary loading-heavy components
+
+Use a clean blue/white/neutral professional interface.
+
+==================================================
+14. SIDEBAR
+==================================================
+
+Sidebar:
+
+MPLADS AI Monitor
+
+Navigation:
+
+Dashboard
+Projects
+Map
+AI Risk Center
+Alerts
+Analytics
+Fund Utilization
+Compliance
+Reports
+
+Admin only:
+
+Data Import
+ML Analysis
+Users
+Audit Logs
+Settings
+
+At bottom:
+
+User
+Role
+Settings
+Logout
+
+==================================================
+15. NATIONAL DASHBOARD
+==================================================
+
+Ministry/Admin dashboard.
+
+Title:
+
+"MPLADS National Monitoring Dashboard"
+
+KPI cards:
+
+- Total Recommended Works
+- Total Completed Works
+- Total Expenditure
+- Total Allocated Amount
+- Fund Utilization
+- High Risk Records
+- Potential Duplicate Works
+- Payment Anomalies
+- Compliance Issues
+
+IMPORTANT:
+
+These values must come from APIs/database.
+
+Never hardcode them.
+
+Filters:
+
+- State
+- Constituency
+- MP
+- Category
+- Date range
+- Risk level
+- Payment status
+
+==================================================
+16. DASHBOARD CHARTS
+==================================================
+
+Create:
+
+1. Recommended vs Completed Works
+
+2. Expenditure Trend
+
+3. Fund Utilization
+
+4. State-wise Expenditure
+
+5. State-wise Completed Works
+
+6. Category-wise Works
+
+7. Risk Distribution
+
+8. Payment Status Distribution
+
+9. Vendor Concentration
+
+10. Completion-duration distribution where data supports it
+
+Charts should be interactive.
+
+Clicking a chart segment should filter related data.
+
+==================================================
+17. PROJECT / WORK EXPLORER
+==================================================
+
+Create a searchable work explorer.
+
+Columns:
+
+- Work ID
+- Work Description
+- Category
+- MP
+- Constituency
+- State
+- Recommended Amount
+- Final Amount
+- Expenditure
+- Recommendation Date
+- Completion Date
+- Status
+- Risk Score
+- Risk Level
+
+Some fields may be unavailable depending on matching.
+
+Use:
+
+"Not available"
+
+instead of fake data.
+
+Features:
+
+- search
+- sorting
+- filtering
+- pagination
+- export CSV
+
+==================================================
+18. PROJECT DETAILS PAGE
+==================================================
+
+Clicking a work/project opens detailed information.
+
+Sections:
+
+PROJECT OVERVIEW
+
+- Work ID
+- Work description
+- Category
+- MP
+- Constituency
+- State
+- IDA
+- Recommendation date
+- Completion date
+
+FINANCIAL INFORMATION
+
+- Recommended amount
+- Final amount
+- Expenditure
+- Expenditure/recommended ratio
+- Final/recommended ratio
+- Variance
+
+WORK LIFECYCLE
+
+Recommended
+    ↓
+Completed if matched
+    ↓
+Expenditure records if matched
+    ↓
+AI analysis
+
+PAYMENT HISTORY
+
+If expenditure records can be matched:
+
+- date
+- vendor
+- amount
+- payment status
+
+RISK ANALYSIS
+
+Show:
+
+- Financial Risk
+- Payment Risk
+- Duplicate Risk
+- Completion Risk
+- Compliance Risk
+- Overall Risk
+
+WHY FLAGGED?
+
+Show human-readable reasons.
+
+RECOMMENDED ACTION
+
+Examples:
+
+"Review expenditure pattern"
+
+"Verify payment record"
+
+"Review potential duplicate"
+
+"Check unusually high final amount"
+
+==================================================
+19. INDIA MAP
+==================================================
+
+Create a dedicated Map page.
+
+Use:
+
+Leaflet + OpenStreetMap.
+
+IMPORTANT:
+
+The current dataset may not contain latitude/longitude.
+
+Do NOT fabricate precise project coordinates.
+
+If state-level geographic information exists:
+
+- show state-level visualization
+
+If district coordinates can be reliably derived from a trusted geographic dataset later:
+
+- allow project/district mapping
+
+Architecture should support latitude/longitude in the future.
+
+Map filters:
+
+- State
+- Constituency
+- Category
+- Risk
+- Status
+
+Clicking a valid mapped record opens its details.
+
+==================================================
+20. AI RISK CENTER
+==================================================
+
+Create:
+
+"AI Risk Center"
+
+Show:
+
+- Records analyzed
+- Anomalies detected
+- High-risk records
+- Potential duplicates
+- Payment anomalies
+- Completion-duration risks
+- Compliance concerns
+
+Main table:
+
+Work
+Risk Score
+Financial Risk
+Payment Risk
+Duplicate Risk
+Completion Risk
+Compliance Risk
+Explanation
+Action
+
+==================================================
+21. ML MODEL 1 — ANOMALY DETECTION
+==================================================
+
+Implement actual Python ML.
+
+Preferred:
+
+Isolation Forest
+
+Possible features:
+
+- recommended amount
+- final amount
+- expenditure amount
+- expenditure/recommended ratio
+- final/recommended ratio
+- number of expenditure transactions
+- payment amount statistics
+- vendor concentration
+- completion duration where available
+- category
+- state
+- constituency
+- other valid numerical features
+
+Use feature engineering.
+
+Do not treat raw absolute amount alone as proof of anomaly.
+
+Where possible, compare records within peer groups:
+
+- same category
+- same state
+- similar amount range
+- similar work type
+
+Output:
+
+- anomaly_score
+- anomaly_flag
+- explanation
+
+==================================================
+22. ML MODEL 2 — PAYMENT ANOMALY
+==================================================
+
+Use expenditure records.
+
+Analyze:
+
+- expenditure amount
+- vendor
+- expenditure date
+- payment status
+- frequency
+- transaction size
+- vendor concentration
+- state/constituency patterns
+
+Detect unusual payment patterns.
+
+Examples:
+
+- unusually large transaction
+- unusual vendor concentration
+- unusual transaction frequency
+- abnormal spending relative to similar works
+
+Output:
+
+payment_risk_score
+
+and explanation.
+
+==================================================
+23. ML MODEL 3 — DUPLICATE WORK DETECTION
+==================================================
+
+This should be one of the major AI features.
+
+Use:
+
+- Work Description
+- Category
+- MP
+- Constituency
+- State
+- IDA
+- amount where useful
+
+Technique:
+
+TF-IDF + Cosine Similarity
+
+Optionally use sentence embeddings later.
+
+Do not compare every record against every other record blindly.
+
+Use blocking first:
+
+same state
+same constituency
+same category where available
+
+Then similarity matching.
+
+Output:
+
+duplicate_candidate
+similarity_score
+matched_record
+explanation
+
+Example:
+
+Work A:
+"Construction of CC road from Village A to School"
+
+Work B:
+"Construction of cement concrete road from Village A towards school"
+
+Similarity:
+
+91%
+
+Display:
+
+"Potential duplicate work — review recommended."
+
+Never claim confirmed duplication.
+
+==================================================
+24. WORK ENTITY MATCHING
+==================================================
+
+Because expenditure records may not contain Work ID, create an entity matching service.
+
+Inputs:
+
+expenditure record
+
+Candidate works
+
+Use:
+
+- exact text matching
+- normalized text
+- fuzzy matching
+- TF-IDF similarity
+- metadata similarity
+- amount/date similarity where appropriate
+
+Output:
+
+matched work
+confidence score
+matching explanation
+
+Example:
+
+"Matched using Work Description + MP + Constituency + State"
+
+Confidence:
+
+93%
+
+If confidence < configurable threshold:
+
+"Needs review"
+
+==================================================
+25. COMPLETION ANALYTICS
+==================================================
+
+Because we have:
+
+Recommendation Date
+
+and:
+
+Completed Date
+
+where Work IDs can be matched, calculate:
+
+Completion Duration =
+Completed Date - Recommendation Date
+
+Analyze:
+
+- average completion duration
+- median completion duration
+- category-wise duration
+- state-wise duration
+- constituency-wise duration
+- unusually long completion durations
+
+Use historical distributions.
+
+Do NOT claim an exact "expected completion date" if that field does not exist.
+
+==================================================
+26. COMPLETION RISK
+==================================================
+
+Build an initial completion-duration risk model.
+
+Use historical completed works to understand normal completion durations.
+
+For works with sufficient information, calculate risk based on:
+
+- category
+- state
+- historical duration
+- amount
+- recommendation date
+- current lifecycle state if available
+
+Output:
+
+Low
+Medium
+High
+
+Clearly label this as:
+
+"Completion-duration risk"
+
+rather than pretending it is a fully supervised project-delay model.
+
+If later we obtain progress/expected-completion data, architecture should support a proper delay prediction model.
+
+==================================================
+27. COST ANALYSIS
+==================================================
+
+Calculate:
+
+Final Amount - Recommended Amount
+
+and:
+
+(Final Amount - Recommended Amount) / Recommended Amount × 100
+
+Use this to identify potential cost variation.
+
+Also compare similar works where possible.
+
+Flag:
+
+- unusually high final/recommended ratio
+- unusually high expenditure/recommended ratio
+
+Use wording:
+
+"Potential cost variance"
+
+or
+
+"Unusual financial deviation"
+
+==================================================
+28. COMPLIANCE ENGINE
+==================================================
+
+Create a configurable rule engine.
+
+Possible rules:
+
+1. Expenditure significantly above recommended amount
+
+2. Final amount significantly above recommended amount
+
+3. Unusual expenditure/final amount ratio
+
+4. Potential duplicate work
+
+5. Unusual payment pattern
+
+6. Work recommended but no corresponding completion record after a long historical period where analysis is appropriate
+
+7. Payment status inconsistencies
+
+IMPORTANT:
+
+Do not hardcode official legal thresholds unless explicitly provided.
+
+Admin should be able to configure thresholds.
+
+Each compliance result should contain:
+
+- rule
+- project/work
+- severity
+- explanation
+- status
+
+==================================================
+29. RISK SCORE
+==================================================
+
+Create an explainable 0–100 risk score.
+
+Possible components:
+
+Financial Risk
+Payment Risk
+Duplicate Risk
+Completion Risk
+Compliance Risk
+
+Make weights configurable.
+
+Default example:
+
+Financial = 30%
+Payment = 20%
+Duplicate = 20%
+Completion = 15%
+Compliance = 15%
+
+Risk levels:
+
+0–30 Low
+31–70 Medium
+71–100 High
+
+Do not blindly assign risk.
+
+If a component is unavailable because data is missing:
+
+- mark it unavailable
+- adjust calculation appropriately
+- explain the limitation
+
+Never fabricate a score from nonexistent data.
+
+==================================================
+30. ALERT GENERATION
+==================================================
+
+Generate alerts from:
+
+- anomaly detection
+- duplicate detection
+- payment anomaly detection
+- cost variance
+- completion-duration risk
+- compliance engine
+
+Alert fields:
+
+- Alert ID
+- Work ID if available
+- Alert type
+- Severity
+- Risk score
+- Explanation
+- Recommended action
+- Created date
+- Assigned user
+- Status
+
+Statuses:
+
+New
+Acknowledged
+Under Investigation
+Resolved
+Dismissed
+
+==================================================
+31. INVESTIGATION WORKFLOW
+==================================================
+
+Authorized users can:
+
+Acknowledge
+Assign
+Investigate
+Add notes
+Upload supporting files if supported
+Resolve
+Dismiss
+
+Investigation fields:
+
+- investigator
+- status
+- notes
+- findings
+- action taken
+- resolution reason
+- timestamps
+
+Every action must be written to audit_logs.
+
+==================================================
+32. ALERT DETAIL
+==================================================
+
+Example UI:
+
+Potential Financial Irregularity
+
+Risk Score:
+84/100
+
+Why flagged:
+
+- Final amount is significantly above the recommended amount.
+- Expenditure pattern is unusual compared with similar works.
+- Payment behavior requires review.
+
+Recommended action:
+
+"Review financial and expenditure records."
+
+Buttons:
+
+Acknowledge
+Assign
+Investigate
+Resolve
+Dismiss
+
+==================================================
+33. ANALYTICS PAGE
+==================================================
+
+Include:
+
+Financial Analytics
+
+- allocated amount
+- recommended amount
+- final amount
+- expenditure
+- utilization
+
+Work Analytics
+
+- recommended works
+- completed works
+- completion rate where meaningful
+- completion duration
+
+Risk Analytics
+
+- high-risk works
+- risk by state
+- risk by category
+- risk by constituency
+
+Payment Analytics
+
+- total transactions
+- successful payments
+- pending payments
+- payment anomalies
+- vendor concentration
+
+==================================================
+34. STATE AND CONSTITUENCY COMPARISON
+==================================================
+
+Allow authorized users to compare:
+
+State
+Constituency
+MP
+
+Metrics:
+
+- recommended works
+- completed works
+- expenditure
+- allocation
+- utilization
+- average completion duration
+- high-risk count
+- payment anomalies
+- duplicate candidates
+
+Do not rank entities without explaining which metric is being used.
+
+==================================================
+35. FUND UTILIZATION PAGE
+==================================================
+
+Show:
+
+Total Allocated
+Total Expenditure
+Utilization %
+
+Breakdowns:
+
+- State
+- Constituency
+- MP
+
+Charts:
+
+- expenditure trend
+- utilization by state
+- utilization by constituency
+- allocation vs expenditure
+
+Use actual database data.
+
+==================================================
+36. COMPLIANCE PAGE
+==================================================
+
+Show:
+
+Total checks
+Passed
+Warnings
+Violations
+High priority
+
+Table:
+
+Work
+Rule
+Severity
+Explanation
+Status
+Assigned Authority
+
+Filters:
+
+State
+Constituency
+Severity
+Status
+Rule
+
+==================================================
+37. DATA IMPORT PAGE
+==================================================
+
+Admin only.
+
+Create a proper data ingestion workflow.
+
+Step 1:
+Upload CSV/Excel
+
+Step 2:
+Preview
+
+Step 3:
+Detect columns
+
+Step 4:
+Map source columns to standardized fields
+
+Step 5:
+Validate
+
+Show:
+
+- missing values
+- invalid dates
+- invalid amounts
+- duplicate records
+- missing Work IDs
+- inconsistent values
+
+Step 6:
+Import
+
+Step 7:
+Summary
+
+Records received
+Records imported
+Records rejected
+Duplicates
+Warnings
+
+Do not silently discard records.
+
+==================================================
+38. DATA QUALITY
+==================================================
+
+Create a Data Quality section.
+
+Metrics:
+
+- missing values
+- duplicate records
+- invalid dates
+- invalid amounts
+- unmatched expenditure records
+- low-confidence entity matches
+- missing Work IDs
+- missing categories
+
+Show actionable recommendations.
+
+==================================================
+39. ML ANALYSIS PAGE
+==================================================
+
+Admin only.
+
+Show:
+
+Dataset version
+Records analyzed
+Model version
+Last run
+Status
+
+Buttons:
+
+Run Full Analysis
+
+Run Anomaly Detection
+
+Run Payment Analysis
+
+Run Duplicate Detection
+
+Run Entity Matching
+
+Run Completion Risk
+
+Run Compliance Checks
+
+After completion show actual results.
+
+Do not fabricate metrics.
+
+==================================================
+40. MODEL EXPLAINABILITY
+==================================================
+
+Every ML result must have an explanation.
+
+For example:
+
+Risk Score: 78
+
+Reasons:
+
+1. Expenditure is 31% above the recommended amount.
+2. Transaction pattern is unusual for similar works.
+3. Completion duration is above the historical peer-group range.
+
+Do not display only:
+
+"model_prediction = 1"
+
+==================================================
+41. REPORTS
+==================================================
+
+Create reports with filters:
+
+- state
+- constituency
+- MP
+- category
+- risk
+- date range
+- alert status
+
+Report sections:
+
+Executive Summary
+Financial Overview
+Work Overview
+Risk Analysis
+Payment Analysis
+Potential Duplicates
+Compliance
+Recommended Actions
+
+Allow:
+
+CSV export
+
+Print/PDF-friendly layout
+
+==================================================
+42. MAP
+==================================================
+
+If reliable geographic coordinates are not present:
+
+DO NOT invent coordinates.
+
+Instead provide:
+
+- state-level map visualization
+- constituency-level geographic view where reliable geographic data is available
+
+Design the database to support:
+
+latitude
+longitude
+
+later.
+
+==================================================
+43. NOTIFICATIONS
+==================================================
+
+In-app notifications:
+
+New high-risk alert
+Alert assigned
+Investigation update
+Alert resolved
+ML analysis completed
+Data import completed
+
+==================================================
+44. AUDIT LOG
+==================================================
+
+Track:
+
+Login
+Logout
+Data import
+ML execution
+Alert creation
+Alert assignment
+Alert acknowledgement
+Investigation update
+Alert resolution
+Configuration changes
+User changes
+
+Show:
+
+User
+Action
+Entity
+Timestamp
+
+==================================================
+45. USER MANAGEMENT
+==================================================
+
+Admin only.
+
+Fields:
+
+Name
+Email
+Role
+State
+District/constituency where applicable
+Status
+
+Actions:
+
+Create
+Disable
+Change role
+Assign scope
+
+Never allow users to elevate their own privileges.
+
+==================================================
+46. API ARCHITECTURE
+==================================================
+
+FastAPI endpoints should include:
+
+GET:
+
+/api/dashboard
+
+/api/projects
+
+/api/projects/{id}
+
+/api/projects/{id}/risk
+
+/api/projects/{id}/payments
+
+/api/alerts
+
+/api/alerts/{id}
+
+/api/analytics/funds
+
+/api/analytics/risk
+
+/api/analytics/states
+
+/api/analytics/constituencies
+
+/api/compliance
+
+/api/data-quality
+
+POST:
+
+/api/data/import
+
+/api/ml/entity-matching
+
+/api/ml/anomaly-detection
+
+/api/ml/payment-anomaly
+
+/api/ml/duplicate-detection
+
+/api/ml/completion-risk
+
+/api/ml/full-analysis
+
+/api/alerts/{id}/acknowledge
+
+/api/alerts/{id}/assign
+
+/api/alerts/{id}/investigate
+
+/api/alerts/{id}/resolve
+
+/api/alerts/{id}/dismiss
+
+==================================================
+47. API RESPONSE DESIGN
+==================================================
+
+Use structured JSON.
+
+Example:
+
+{
+  "work_id": "12345",
+  "risk_score": 82,
+  "risk_level": "HIGH",
+  "components": {
+    "financial": 28,
+    "payment": 18,
+    "duplicate": 20,
+    "completion": 8,
+    "compliance": 8
+  },
+  "reasons": [
+    "Expenditure is significantly above the recommended amount",
+    "Payment pattern differs from similar works"
+  ]
+}
+
+==================================================
+48. ERROR HANDLING
+==================================================
+
+Handle:
+
+- loading
+- empty
+- API errors
+- ML service unavailable
+- database errors
+- authentication errors
+
+If FastAPI is unavailable:
+
+Show:
+
+"AI analysis service is currently unavailable."
+
+Do not show fake results.
+
+==================================================
+49. PERFORMANCE
+==================================================
+
+The dataset contains 80k–100k+ records.
+
+Therefore:
+
+Do not load the entire dataset into the browser.
+
+Use:
+
+- server-side pagination
+- filtering
+- aggregation
+- caching
+- lazy loading
+- database indexes
+- map clustering if point data exists
+
+ML should run server-side.
+
+==================================================
+50. DATABASE INDEXES
+==================================================
+
+Create indexes for commonly queried fields:
+
+work_id
+state
+constituency
+mp_name
+category
+recommendation_date
+completed_date
+expenditure_date
+vendor
+risk_score
+risk_level
+alert_status
+
+==================================================
+51. DATA CONSISTENCY
+==================================================
+
+All dashboard values must come from the same database/API layer.
+
+Do not separately hardcode:
+
+KPI numbers
+chart values
+table counts
+
+For example, if there are 187 high-risk records, every relevant dashboard component should derive that number from the same underlying analysis.
+
+==================================================
+52. DEMO DATA
+==================================================
+
+If real data has not yet been imported, create a clearly labeled demo mode.
+
+Demo records must be fictional.
+
+Include:
+
+- normal work
+- high financial deviation
+- payment anomaly
+- potential duplicate
+- long completion duration
+- low-risk work
+- medium-risk work
+- high-risk work
+
+Do not represent fictional records as real government records.
+
+==================================================
+53. NO FAKE AI
+==================================================
+
+This is a critical requirement.
+
+Do not implement:
+
+if project.amount > X:
+    "AI says fraud"
+
+Do not use fake AI badges.
+
+Do not create fake model accuracy.
+
+Do not display "95% accurate" unless actual evaluation proves it.
+
+Use real Python ML.
+
+If the model is not trained yet:
+
+show:
+
+"Model not trained"
+
+or:
+
+"ML service not connected"
+
+rather than fake predictions.
+
+==================================================
+54. MODEL TRAINING
+==================================================
+
+Structure the Python backend so ML training and prediction are separate.
+
+Example:
+
+ml/
+    anomaly/
+    payment/
+    duplicate/
+    completion/
+    feature_engineering/
+    risk_engine/
+
+Store:
+
+model version
+training date
+dataset version
+features
+prediction timestamp
+
+==================================================
+55. MODEL EVALUATION
+==================================================
+
+For unsupervised anomaly detection:
+
+show appropriate metrics/validation methods where possible.
+
+For supervised models:
+
+only show:
+
+Accuracy
+Precision
+Recall
+F1
+ROC-AUC
+
+when a valid labeled test dataset exists.
+
+Never fabricate metrics.
+
+==================================================
+56. SECURITY
+==================================================
+
+Implement:
+
+Supabase Auth
+Row Level Security
+Role-based authorization
+API authentication
+Input validation
+Secure environment variables
+
+Never expose:
+
+SUPABASE_SERVICE_ROLE_KEY
+
+to frontend.
+
+Never hardcode secrets.
+
+==================================================
+57. ENVIRONMENT VARIABLES
+==================================================
+
+Frontend:
+
+VITE_API_URL
+VITE_SUPABASE_URL
+VITE_SUPABASE_ANON_KEY
+
+Backend:
+
+SUPABASE_URL
+SUPABASE_SERVICE_KEY
+DATABASE_URL
+
+ML configuration should also be environment based.
+
+==================================================
+58. UI BRANDING
+==================================================
+
+Application name:
+
+MPLADS AI Monitor
+
+Tagline:
+
+Smarter Monitoring. Earlier Detection. Better Accountability.
+
+Team:
+
+CodeDev's
+
+Keep team branding subtle.
+
+Do not make the application look like a personal/student project.
+
+It should look like a serious government technology platform.
+
+==================================================
+59. LANDING / LOGIN PAGE
+==================================================
+
+Professional login.
+
+MPLADS AI Monitor
+
+AI-powered MPLADS monitoring and risk analytics
+
+Email
+Password
+
+Login
+
+Forgot Password
+
+Do not include a role selector that allows arbitrary privilege selection.
+
+==================================================
+60. DASHBOARD LANGUAGE
+==================================================
+
+Use simple language.
+
+Instead of:
+
+"Isolation Forest anomaly score = -0.237"
+
+display:
+
+"Unusual financial pattern detected"
+
+Then allow advanced users to view:
+
+Model score
+Model version
+Features contributing to anomaly
+
+==================================================
+61. RESPONSIVENESS
+==================================================
+
+Desktop-first.
+
+Support:
+
+Laptop
+Tablet
+Smaller screens
+
+Collapse sidebar on smaller screens.
+
+Tables should scroll horizontally if necessary.
+
+==================================================
+62. FUTURE EXTENSIBILITY
+==================================================
+
+Keep architecture ready for future modules:
+
+- satellite image verification
+- project-site image analysis
+- OCR
+- computer vision
+- geospatial anomaly detection
+- contractor risk profiling
+- graph-based fraud detection
+- LLM analytics assistant
+- WhatsApp/SMS notifications
+
+Do not implement these now unless required.
+
+==================================================
+63. OPTIONAL NATURAL LANGUAGE ASSISTANT
+==================================================
+
+If implemented, it must query actual backend/database data.
+
+Examples:
+
+"Show high-risk works in Maharashtra."
+
+"Which states have the highest expenditure?"
+
+"Find potential duplicate works."
+
+"Show payment anomalies."
+
+Never invent numbers.
+
+If no LLM/API key exists, keep the feature disabled rather than simulating it.
+
+==================================================
+64. IMPORTANT LIMITATIONS TO DISPLAY
+==================================================
+
+Create a small "Data & AI Methodology" section explaining:
+
+- Results are risk indicators, not proof of fraud.
+- Missing data can affect predictions.
+- Potential duplicate matches require human verification.
+- ML models support human decision-making.
+- Geographic visualization is shown only where reliable location information is available.
+- Some analysis is based on historical patterns.
+
+This will make the system more credible.
+
+==================================================
+65. METHODOLOGY PAGE
+==================================================
+
+Create a page:
+
+"How MPLADS AI Monitor Works"
+
+Show:
+
+Data Sources
+↓
+Data Validation
+↓
+Data Cleaning
+↓
+Entity Matching
+↓
+Feature Engineering
+↓
+ML Analysis
+↓
+Risk Scoring
+↓
+Compliance Checks
+↓
+Alerts
+↓
+Human Investigation
+
+Explain each step in simple language.
+
+==================================================
+66. FINAL DASHBOARD EXPERIENCE
+==================================================
+
+The first dashboard screen should immediately answer:
+
+How many works are being monitored?
+
+How much money is involved?
+
+How much has been spent?
+
+How many works are completed?
+
+What requires attention?
+
+Where are the highest-risk records?
+
+What unusual patterns were detected?
+
+What actions should authorities take?
+
+==================================================
+67. FINAL PRODUCT QUALITY
+==================================================
+
+The final application must feel like:
+
+A real government monitoring and decision-support platform.
+
+It should NOT feel like:
+
+- a college CRUD project
+- a static dashboard
+- a fake AI demo
+- a template with random charts
+
+Every important visualization must have a purpose.
+
+Every important number must come from data.
+
+Every AI result must have an explanation.
+
+Every role must have appropriate permissions.
+
+==================================================
+68. IMPLEMENTATION PRIORITY
+==================================================
+
+Build in this order:
+
+PHASE 1:
+Authentication
+Database
+Dataset import
+Data validation
+
+PHASE 2:
+Dashboard
+Projects
+Project details
+Fund analytics
+
+PHASE 3:
+Entity matching
+Anomaly detection
+Payment anomaly detection
+
+PHASE 4:
+Duplicate detection
+Completion-duration analysis
+Risk scoring
+
+PHASE 5:
+Alerts
+Investigation workflow
+Compliance
+
+PHASE 6:
+Map
+Reports
+Advanced analytics
+
+PHASE 7:
+Optimization
+Audit
+Model versioning
+Advanced security
+
+==================================================
+69. MOST IMPORTANT REQUIREMENT
+==================================================
+
+Do not assume that every desired field exists in the current MPLADS datasets.
+
+Build the application based on ACTUAL AVAILABLE DATA.
+
+If a field is missing:
+
+- do not fabricate it
+- do not generate random values
+- mark it unavailable
+- design the system so it can be added later
+
+The platform should be honest about its data limitations.
+
+==================================================
+70. FINAL OBJECTIVE
+==================================================
+
+The finished system should transform MPLADS raw data into:
+
+RAW DATA
+    ↓
+STRUCTURED DATA
+    ↓
+ANALYTICS
+    ↓
+AI/ML DETECTION
+    ↓
+RISK SCORING
+    ↓
+EXPLAINABLE ALERTS
+    ↓
+HUMAN INVESTIGATION
+    ↓
+BETTER MONITORING
+
+The core message:
+
+"MPLADS AI Monitor helps authorities identify where attention is needed before problems become difficult to detect."
+
+Build the entire application with this architecture and these requirements.
