@@ -1,4 +1,4 @@
-# MPLADS AI Monitor
+# CivicLense
 
 A local decision-support dashboard built around the supplied MPLADS CSV datasets. It calculates live aggregates and explainable review signals; it does not label people or organizations as fraudulent.
 

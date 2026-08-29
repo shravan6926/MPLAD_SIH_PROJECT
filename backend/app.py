@@ -80,6 +80,7 @@ def load_data():
     projects["Payment Status"] = projects["Work ID"].map(expenditure_status_by_id(expenditures, projects)).fillna("Not available")
     projects["variance"] = np.where(projects["Recommended Amount (INR)"] > 0, (projects["Final Amount"] - projects["Recommended Amount (INR)"]) / projects["Recommended Amount (INR)"], 0)
     projects["duration"] = (projects["Completed Date"] - projects["Recommendation Date"]).dt.days
+    projects["anomaly_score"] = compute_anomaly_scores(projects)
     projects["risk_score"], projects["risk_reasons"] = score_projects(projects, expenditures)
     projects["risk_level"] = pd.cut(projects["risk_score"], [-1, 30, 70, 101], labels=["Low", "Medium", "High"]).astype(str)
     return {"recommended": recommended, "completed": completed, "expenditures": expenditures, "summary": summary, "allocated": allocated, "projects": projects}
@@ -99,17 +100,20 @@ def expenditure_status_by_id(exp, projects):
     statuses = exp.groupby("match_key")["Payment Status"].agg(lambda values: ", ".join(sorted(set(str(value) for value in values if str(value).strip()))))
     return pd.Series(project_keys.map(statuses).values, index=projects.index)
 
+def compute_anomaly_scores(projects):
+    features = projects[["Recommended Amount (INR)", "Final Amount", "Expenditure"]].fillna(0)
+    if len(features) <= 10:
+        return pd.Series(0, index=projects.index)
+    model = IsolationForest(n_estimators=80, contamination="auto", random_state=42, n_jobs=-1).fit(features)
+    return pd.Series(-model.decision_function(features), index=projects.index).rank(pct=True) * 25
+
+
 def score_projects(projects, expenditures):
     amount = projects["Recommended Amount (INR)"].replace(0, np.nan)
     financial = ((projects["Final Amount"] / amount - 1).clip(0, 1) * 45).fillna(0)
     missing_completion = (~projects["completed"]).astype(int) * 10
     long_duration = ((projects["duration"].fillna(0) - 365).clip(0, 730) / 730 * 20)
-    features = projects[["Recommended Amount (INR)", "Final Amount", "Expenditure"]].fillna(0)
-    if len(features) > 10:
-        model = IsolationForest(n_estimators=80, contamination="auto", random_state=42, n_jobs=-1).fit(features)
-        anomaly = pd.Series(-model.decision_function(features), index=projects.index).rank(pct=True) * 25
-    else:
-        anomaly = pd.Series(0, index=projects.index)
+    anomaly = projects.get("anomaly_score", pd.Series(0, index=projects.index))
     scores = (financial + missing_completion + long_duration + anomaly).clip(0, 100).round().astype(int)
     reasons = []
     for idx, row in projects.iterrows():
@@ -122,9 +126,53 @@ def score_projects(projects, expenditures):
         reasons.append(current)
     return scores, reasons
 
+
+def confidence_for_row(row):
+    present = 0
+    for field in ["MP Name", "Constituency", "State", "Work Description", "Category", "Recommendation Date"]:
+        value = row.get(field)
+        if pd.notna(value) and str(value).strip():
+            present += 1
+    if present >= 5:
+        return "High"
+    if present >= 3:
+        return "Medium"
+    return "Low"
+
+
+def provenance_for_row(row):
+    used_fields = [
+        "Work ID",
+        "MP Name",
+        "Constituency",
+        "State",
+        "Work Description",
+        "Category",
+        "Recommended Amount (INR)",
+        "Final Amount (INR)",
+        "Expenditure Amount (INR)",
+        "Recommendation Date",
+        "Completed Date",
+        "Payment Status",
+    ]
+    missing_fields = [field for field in used_fields if pd.isna(row.get(field)) or str(row.get(field)).strip() == ""]
+    return {
+        "used_fields": used_fields,
+        "missing_fields": missing_fields,
+        "matching_method": "Metadata-based matching using MP Name + Constituency + State + Work Description because source expenditures have no Work ID.",
+        "source_files": [
+            "mplads_recommended_works_2026-08-28.csv",
+            "mplads_completed_works_2026-08-28.csv",
+            "mplads_expenditures_2026-08-28.csv",
+            "Allocated Limit for Honble MPs.csv",
+        ],
+        "notes": "This app does not fabricate missing Work IDs or coordinates; manual review remains necessary when the evidence is weak.",
+    }
+
+
 DATA = load_data()
 ALERT_STATE = {}
-app = FastAPI(title="MPLADS AI Monitor", version="1.0.0")
+app = FastAPI(title="CivicLense", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def num(value):
@@ -134,7 +182,16 @@ def project_json(row):
     recommended = num(row.get("Recommended Amount (INR)"))
     expenditure = num(row.get("Expenditure"))
     variance = num(row.get("variance"))
-    return {"work_id": str(row["Work ID"]), "description": clean_text(row.get("Work Description")), "category": clean_text(row.get("Category")) or "Not available", "mp": clean_text(row.get("MP Name")), "constituency": clean_text(row.get("Constituency")), "state": clean_text(row.get("State")), "recommended": recommended, "final": num(row.get("Final Amount")), "expenditure": expenditure, "remaining_budget": num(recommended - expenditure), "variance_percentage": num(variance * 100), "recommendation_date": date_json(row.get("Recommendation Date")), "completed_date": date_json(row.get("Completed Date")), "payment_status": clean_text(row.get("Payment Status")) or "Not available", "status": "Completed" if row.get("completed") else "Recommended", "risk_score": int(row.get("risk_score", 0)), "risk_level": row.get("risk_level", "Low"), "reasons": row.get("risk_reasons", [])}
+    confidence = confidence_for_row(row)
+    score_breakdown = {
+        "financial_variance": round(float(max(0, variance)) * 100, 1),
+        "duration_over_threshold": int(pd.notna(row.get("duration")) and row.get("duration") > 365),
+        "missing_completion_record": int(not bool(row.get("completed"))),
+        "anomaly_model_score": int(row.get("anomaly_score", 0)),
+        "data_quality_confidence": confidence,
+    }
+    provenance = provenance_for_row(row)
+    return {"work_id": str(row["Work ID"]), "description": clean_text(row.get("Work Description")), "category": clean_text(row.get("Category")) or "Not available", "mp": clean_text(row.get("MP Name")), "constituency": clean_text(row.get("Constituency")), "state": clean_text(row.get("State")), "recommended": recommended, "final": num(row.get("Final Amount")), "expenditure": expenditure, "remaining_budget": num(recommended - expenditure), "variance_percentage": num(variance * 100), "recommendation_date": date_json(row.get("Recommendation Date")), "completed_date": date_json(row.get("Completed Date")), "payment_status": clean_text(row.get("Payment Status")) or "Not available", "status": "Completed" if row.get("completed") else "Recommended", "risk_score": int(row.get("risk_score", 0)), "risk_level": row.get("risk_level", "Low"), "confidence": confidence, "score_breakdown": score_breakdown, "provenance": provenance, "reasons": row.get("risk_reasons", [])}
 
 def date_json(value):
     return value.isoformat()[:10] if pd.notna(value) else None
@@ -192,7 +249,15 @@ def alerts(state: str = "all", risk: str = "all", search: str = ""):
 def alert_json(row):
     work_id = str(row["Work ID"])
     saved = ALERT_STATE.get(work_id, {})
-    return {"id": f"ALT-{work_id}", "work_id": work_id, "state": clean_text(row["State"]), "type": "Potential irregularity", "severity": row["risk_level"], "score": int(row["risk_score"]), "explanation": row["risk_reasons"][0], "status": saved.get("status", "New"), "assigned_to": saved.get("assigned_to", ""), "note": saved.get("note", ""), "action": "Review available financial and completion records"}
+    confidence = confidence_for_row(row)
+    score_breakdown = {
+        "financial_variance": round(float(max(0, row.get("variance", 0))) * 100, 1),
+        "duration_over_threshold": int(pd.notna(row.get("duration")) and row.get("duration") > 365),
+        "missing_completion_record": int(not bool(row.get("completed"))),
+        "anomaly_model_score": int(row.get("anomaly_score", 0)),
+        "data_quality_confidence": confidence,
+    }
+    return {"id": f"ALT-{work_id}", "work_id": work_id, "state": clean_text(row["State"]), "type": "Potential irregularity", "severity": row["risk_level"], "score": int(row["risk_score"]), "confidence": confidence, "score_breakdown": score_breakdown, "provenance": provenance_for_row(row), "explanation": row["risk_reasons"][0], "status": saved.get("status", "New"), "assigned_to": saved.get("assigned_to", ""), "note": saved.get("note", ""), "action": "Review available financial and completion records"}
 
 @app.post("/api/alerts/{alert_id}/action")
 def alert_action(alert_id: str, payload: dict = Body(default={})): 
