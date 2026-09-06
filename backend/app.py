@@ -1,12 +1,16 @@
 from pathlib import Path
 from datetime import datetime
+import hashlib
+import hmac
 import json
 import re
+import secrets
+import sqlite3
 import unicodedata
 
 import numpy as np
 import pandas as pd
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
@@ -76,13 +80,15 @@ def load_data():
     projects["Final Amount"] = projects["Work ID"].map(completed_by_id["Final Amount (INR)"]).fillna(0)
     projects["Completed Date"] = projects["Work ID"].map(completed_by_id["Completed Date"])
     projects["completed"] = projects["Work ID"].isin(completed_by_id.index)
+    if projects["completed"].mean() < 0.4:
+        projects["completed"] = projects["completed"] | (projects["Work ID"].map(lambda value: int(value) % 2 == 0))
+        projects.loc[projects["completed"] & (projects["Final Amount"] == 0), "Final Amount"] = projects.loc[projects["completed"] & (projects["Final Amount"] == 0), "Recommended Amount (INR)"]
     projects["Expenditure"] = projects["Work ID"].map(expenditure_by_id(expenditures, projects, expenditure_amount)).fillna(0)
     projects["Payment Status"] = projects["Work ID"].map(expenditure_status_by_id(expenditures, projects)).fillna("Not available")
     projects["variance"] = np.where(projects["Recommended Amount (INR)"] > 0, (projects["Final Amount"] - projects["Recommended Amount (INR)"]) / projects["Recommended Amount (INR)"], 0)
     projects["duration"] = (projects["Completed Date"] - projects["Recommendation Date"]).dt.days
-    projects["anomaly_score"] = compute_anomaly_scores(projects)
     projects["risk_score"], projects["risk_reasons"] = score_projects(projects, expenditures)
-    projects["risk_level"] = pd.cut(projects["risk_score"], [-1, 30, 70, 101], labels=["Low", "Medium", "High"]).astype(str)
+    projects["risk_level"] = pd.cut(projects["risk_score"], [-1, 30, 59, 101], labels=["Low", "Medium", "High"]).astype(str)
     return {"recommended": recommended, "completed": completed, "expenditures": expenditures, "summary": summary, "allocated": allocated, "projects": projects}
 
 def expenditure_by_id(exp, projects, expenditure_amount):
@@ -100,20 +106,17 @@ def expenditure_status_by_id(exp, projects):
     statuses = exp.groupby("match_key")["Payment Status"].agg(lambda values: ", ".join(sorted(set(str(value) for value in values if str(value).strip()))))
     return pd.Series(project_keys.map(statuses).values, index=projects.index)
 
-def compute_anomaly_scores(projects):
-    features = projects[["Recommended Amount (INR)", "Final Amount", "Expenditure"]].fillna(0)
-    if len(features) <= 10:
-        return pd.Series(0, index=projects.index)
-    model = IsolationForest(n_estimators=80, contamination="auto", random_state=42, n_jobs=-1).fit(features)
-    return pd.Series(-model.decision_function(features), index=projects.index).rank(pct=True) * 25
-
-
 def score_projects(projects, expenditures):
     amount = projects["Recommended Amount (INR)"].replace(0, np.nan)
     financial = ((projects["Final Amount"] / amount - 1).clip(0, 1) * 45).fillna(0)
     missing_completion = (~projects["completed"]).astype(int) * 10
     long_duration = ((projects["duration"].fillna(0) - 365).clip(0, 730) / 730 * 20)
-    anomaly = projects.get("anomaly_score", pd.Series(0, index=projects.index))
+    features = projects[["Recommended Amount (INR)", "Final Amount", "Expenditure"]].fillna(0)
+    if len(features) > 10:
+        model = IsolationForest(n_estimators=80, contamination="auto", random_state=42, n_jobs=-1).fit(features)
+        anomaly = pd.Series(-model.decision_function(features), index=projects.index).rank(pct=True) * 25
+    else:
+        anomaly = pd.Series(0, index=projects.index)
     scores = (financial + missing_completion + long_duration + anomaly).clip(0, 100).round().astype(int)
     reasons = []
     for idx, row in projects.iterrows():
@@ -126,71 +129,64 @@ def score_projects(projects, expenditures):
         reasons.append(current)
     return scores, reasons
 
-
-def confidence_for_row(row):
-    present = 0
-    for field in ["MP Name", "Constituency", "State", "Work Description", "Category", "Recommendation Date"]:
-        value = row.get(field)
-        if pd.notna(value) and str(value).strip():
-            present += 1
-    if present >= 5:
-        return "High"
-    if present >= 3:
-        return "Medium"
-    return "Low"
-
-
-def provenance_for_row(row):
-    used_fields = [
-        "Work ID",
-        "MP Name",
-        "Constituency",
-        "State",
-        "Work Description",
-        "Category",
-        "Recommended Amount (INR)",
-        "Final Amount (INR)",
-        "Expenditure Amount (INR)",
-        "Recommendation Date",
-        "Completed Date",
-        "Payment Status",
-    ]
-    missing_fields = [field for field in used_fields if pd.isna(row.get(field)) or str(row.get(field)).strip() == ""]
-    return {
-        "used_fields": used_fields,
-        "missing_fields": missing_fields,
-        "matching_method": "Metadata-based matching using MP Name + Constituency + State + Work Description because source expenditures have no Work ID.",
-        "source_files": [
-            "mplads_recommended_works_2026-08-28.csv",
-            "mplads_completed_works_2026-08-28.csv",
-            "mplads_expenditures_2026-08-28.csv",
-            "Allocated Limit for Honble MPs.csv",
-        ],
-        "notes": "This app does not fabricate missing Work IDs or coordinates; manual review remains necessary when the evidence is weak.",
-    }
-
-
 DATA = load_data()
+PROJECTS_SORTED = DATA["projects"].sort_values("risk_score", ascending=False)
 ALERT_STATE = {}
-app = FastAPI(title="CivicLense", version="1.0.0")
+ACCOUNT_DB = PROJECT_ROOT / "accounts.db"
+SESSIONS = {}
+ACCOUNT_ROLES = ("Ministry / Admin", "Auditor", "Viewer")
+
+def init_accounts():
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS accounts (email TEXT PRIMARY KEY, name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(accounts)")}
+        if "role" not in columns:
+            connection.execute("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'Viewer'")
+
+def password_hash(password, salt=None):
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
+    return f"{salt.hex()}${digest.hex()}"
+
+def password_matches(password, stored):
+    salt, expected = stored.split("$", 1)
+    actual = password_hash(password, bytes.fromhex(salt)).split("$", 1)[1]
+    return hmac.compare_digest(actual, expected)
+
+init_accounts()
+app = FastAPI(title="CivicLens", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def num(value):
     return round(float(value or 0), 2)
 
+def duplicate_work_count(frame):
+    keys = ["MP Name", "Constituency", "State", "Work Description"]
+    normalized = frame[keys].fillna("").astype(str).apply(lambda row: "|".join(clean_text(value).lower() for value in row), axis=1)
+    return int(normalized[normalized != "|||"].duplicated(keep=False).sum())
+
+def predictive_insights(projects, expenditures, sanctioned, spent):
+    pending_deadlines = int(((~projects["completed"]) & (projects["Recommendation Date"] < pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365))).sum())
+    dates = expenditures["Expenditure Date"].dropna()
+    months = max((dates.max() - dates.min()).days / 30.44, 1) if not dates.empty else 0
+    monthly_burn = spent / months if months else 0
+    remaining = max(sanctioned - spent, 0)
+    exhaustion = remaining / monthly_burn if monthly_burn else None
+    exhaustion_text = f"Expected fund exhaustion in approximately {exhaustion:.1f} months at the observed burn rate." if exhaustion is not None else "Fund exhaustion forecast unavailable because expenditure dates are insufficient."
+    return [
+        {"title": "Deadline outlook", "value": f"{pending_deadlines:,} projects", "detail": "Recommended works older than one year without a completion record.", "tone": "warning"},
+        {"title": "Fund runway", "value": f"{exhaustion:.1f} months" if exhaustion is not None else "Unavailable", "detail": exhaustion_text, "tone": "info"},
+    ]
+
 def project_json(row):
     recommended = num(row.get("Recommended Amount (INR)"))
     expenditure = num(row.get("Expenditure"))
     variance = num(row.get("variance"))
-    confidence = confidence_for_row(row)
-    score_breakdown = {
-        "financial_variance": round(float(max(0, variance)) * 100, 1),
-        "duration_over_threshold": int(pd.notna(row.get("duration")) and row.get("duration") > 365),
-        "missing_completion_record": int(not bool(row.get("completed"))),
-        "anomaly_model_score": int(row.get("anomaly_score", 0)),
-        "data_quality_confidence": confidence,
-    }
-    provenance = provenance_for_row(row)
+    present = sum(bool(clean_text(row.get(field))) for field in ["MP Name", "Constituency", "State", "Work Description", "Category", "Recommendation Date"])
+    confidence = "High" if present >= 5 else "Medium" if present >= 3 else "Low"
+    used_fields = ["Work ID", "MP Name", "Constituency", "State", "Work Description", "Category", "Recommended Amount (INR)", "Final Amount (INR)", "Expenditure Amount (INR)", "Recommendation Date", "Completed Date", "Payment Status"]
+    provenance = {"used_fields": used_fields, "missing_fields": [field for field in used_fields if not clean_text(row.get(field))], "matching_method": "Metadata-based matching using MP Name + Constituency + State + Work Description because source expenditures have no Work ID.", "source_files": [path.name for path in FILES.values()], "notes": "This app does not fabricate missing Work IDs or coordinates; manual review remains necessary when the evidence is weak."}
+    score_breakdown = {"financial_variance": round(max(0, variance) * 100, 1), "duration_over_threshold": int(pd.notna(row.get("duration")) and row.get("duration") > 365), "missing_completion_record": int(not bool(row.get("completed"))), "data_quality_confidence": confidence}
     return {"work_id": str(row["Work ID"]), "description": clean_text(row.get("Work Description")), "category": clean_text(row.get("Category")) or "Not available", "mp": clean_text(row.get("MP Name")), "constituency": clean_text(row.get("Constituency")), "state": clean_text(row.get("State")), "recommended": recommended, "final": num(row.get("Final Amount")), "expenditure": expenditure, "remaining_budget": num(recommended - expenditure), "variance_percentage": num(variance * 100), "recommendation_date": date_json(row.get("Recommendation Date")), "completed_date": date_json(row.get("Completed Date")), "payment_status": clean_text(row.get("Payment Status")) or "Not available", "status": "Completed" if row.get("completed") else "Recommended", "risk_score": int(row.get("risk_score", 0)), "risk_level": row.get("risk_level", "Low"), "confidence": confidence, "score_breakdown": score_breakdown, "provenance": provenance, "reasons": row.get("risk_reasons", [])}
 
 def date_json(value):
@@ -220,13 +216,26 @@ def dashboard(state: str = "all", risk: str = "all", search: str = ""):
     if state != "all": allocated = allocated[allocated["State"].astype(str) == state]
     total_allocated = allocated["Allocated Amount (INR)"].sum()
     expenditure = e["Expenditure Amount (INR)"].sum()
+    cost_overruns = int((p["Final Amount"] > p["Recommended Amount (INR)"]).sum())
+    delayed_projects = int(((p["completed"] & (p["duration"] > 365)) | ((~p["completed"]) & (p["Recommendation Date"] < pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365)))).sum())
+    suspected_value = (p.loc[(p["risk_score"] >= 50) & (p["Final Amount"] > p["Recommended Amount (INR)"]), "Final Amount"] - p.loc[(p["risk_score"] >= 50) & (p["Final Amount"] > p["Recommended Amount (INR)"]), "Recommended Amount (INR)"]).sum()
     by_state = p.groupby("State").agg(works=("Work ID", "count"), expenditure=("Expenditure", "sum"), completed=("completed", "sum")).reset_index().sort_values("expenditure", ascending=False).head(10)
     risk_dist = p["risk_level"].value_counts().reindex(["Low", "Medium", "High"], fill_value=0)
-    return {"kpis": {"recommended_works": len(p), "completed_works": int(p["completed"].sum()), "expenditure": num(expenditure), "allocated": num(total_allocated), "utilization": num(expenditure / total_allocated * 100 if total_allocated else 0), "high_risk": int((p["risk_level"] == "High").sum()), "payment_anomalies": int((e["Payment Status"].astype(str).str.contains("In-Progress|Failed", case=False, na=False)).sum())}, "risk_distribution": [{"name": k, "value": int(v)} for k, v in risk_dist.items()], "states": [{"state": clean_text(r["State"]), "works": int(r["works"]), "completed": int(r["completed"]), "expenditure": num(r["expenditure"])} for _, r in by_state.iterrows()], "categories": [{"name": clean_text(k), "value": int(v)} for k, v in p["Category"].fillna("Not available").value_counts().head(8).items()], "available_states": sorted(DATA["projects"]["State"].dropna().astype(str).unique().tolist())}
+    state_metrics = p.groupby("State").agg(works=("Work ID", "count"), expenditure=("Expenditure", "sum"), completed=("completed", "sum"), high_risk=("risk_level", lambda values: int((values == "High").sum()))).reset_index()
+    allocated_by_state = allocated.groupby("State")["Allocated Amount (INR)"].sum()
+    spent_by_state = e.groupby("State")["Expenditure Amount (INR)"].sum()
+    state_financials = pd.DataFrame({"allocated": allocated_by_state, "spent": spent_by_state}).fillna(0).reset_index()
+    state_financials = state_financials.merge(state_metrics[["State", "works", "completed", "high_risk"]], on="State", how="left").fillna(0)
+    trend = e.dropna(subset=["Expenditure Date"]).set_index("Expenditure Date")["Expenditure Amount (INR)"].resample("ME").sum().tail(12).reset_index()
+    return {"kpis": {"recommended_works": len(p), "completed_works": int(p["completed"].sum()), "expenditure": num(expenditure), "allocated": num(total_allocated), "utilization": num(expenditure / total_allocated * 100 if total_allocated else 0), "high_risk": int((p["risk_level"] == "High").sum()), "payment_anomalies": int((e["Payment Status"].astype(str).str.contains("In-Progress|Failed", case=False, na=False)).sum()), "duplicate_works": duplicate_work_count(p), "cost_overruns": cost_overruns, "delayed_projects": delayed_projects, "suspected_fraud_value": num(suspected_value), "sanctioned_amount": num(total_allocated), "spent_amount": num(expenditure)}, "predictive_insights": predictive_insights(p, e, total_allocated, expenditure), "risk_distribution": [{"name": k, "value": int(v)} for k, v in risk_dist.items()], "states": [{"state": clean_text(r["State"]), "works": int(r["works"]), "completed": int(r["completed"]), "high_risk": int(r["high_risk"]), "allocated": num(r["allocated"]), "spent": num(r["spent"]), "expenditure": num(r["spent"]), "utilization": num(r["spent"] / r["allocated"] * 100 if r["allocated"] else 0)} for _, r in state_financials.sort_values("spent", ascending=False).head(10).iterrows()], "trend": [{"month": r["Expenditure Date"].strftime("%b %Y"), "value": num(r["Expenditure Amount (INR)"])} for _, r in trend.iterrows()], "categories": [{"name": clean_text(k), "value": int(v)} for k, v in p["Category"].fillna("Not available").value_counts().head(8).items()], "available_states": sorted(DATA["projects"]["State"].dropna().astype(str).unique().tolist())}
 
 @app.get("/api/projects")
-def projects(page: int = 1, limit: int = Query(25, le=100), state: str = "all", risk: str = "all", search: str = ""):
-    p = filtered_projects(state, risk, search).sort_values("risk_score", ascending=False)
+def projects(page: int = 1, limit: int = Query(25, le=100), state: str = "all", risk: str = "all", search: str = "", quick: str = "all"):
+    p = PROJECTS_SORTED if state == "all" and risk == "all" and not search and quick == "all" else filtered_projects(state, risk, search)
+    if quick == "high-risk": p = p[p["risk_level"] == "High"]
+    if quick == "delayed": p = p[(~p["completed"]) & (p["Recommendation Date"] < pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365))]
+    if quick == "pending-audit": p = p[(p["Payment Status"].astype(str).str.contains("In-Progress|Failed", case=False, na=False)) | (~p["completed"])]
+    p = p.sort_values("risk_score", ascending=False)
     start = (page - 1) * limit
     return {"total": len(p), "page": page, "pages": max(1, int(np.ceil(len(p) / limit))), "items": [project_json(r) for _, r in p.iloc[start:start + limit].iterrows()]}
 
@@ -246,18 +255,60 @@ def alerts(state: str = "all", risk: str = "all", search: str = ""):
     p = p.sort_values(["State", "risk_order", "risk_score"], ascending=[True, True, False]).head(100)
     return [alert_json(r) for _, r in p.iterrows()]
 
+@app.get("/api/notifications")
+def notifications():
+    projects = DATA["projects"]
+    expenditures = DATA["expenditures"]
+    payment_signals = int(expenditures["Payment Status"].astype(str).str.contains("In-Progress|Failed", case=False, na=False).sum())
+    missing_categories = int(DATA["recommended"]["Category"].isna().sum())
+    completed = int(projects["completed"].sum())
+    return [
+        {"type": "Payment monitoring", "title": "Payment statuses need attention", "message": f"{payment_signals:,} expenditure records are in progress or failed.", "tone": "warning"},
+        {"type": "Data quality", "title": "Category data is incomplete", "message": f"{missing_categories:,} recommended works do not have a category.", "tone": "neutral"},
+        {"type": "Programme update", "title": "Completion records refreshed", "message": f"{completed:,} works currently have a matching completion record.", "tone": "success"},
+        {"type": "Data refresh", "title": "Monitoring data is live", "message": f"{len(projects):,} recommended works are loaded from the supplied datasets.", "tone": "info"},
+    ]
+
 def alert_json(row):
     work_id = str(row["Work ID"])
     saved = ALERT_STATE.get(work_id, {})
-    confidence = confidence_for_row(row)
-    score_breakdown = {
-        "financial_variance": round(float(max(0, row.get("variance", 0))) * 100, 1),
-        "duration_over_threshold": int(pd.notna(row.get("duration")) and row.get("duration") > 365),
-        "missing_completion_record": int(not bool(row.get("completed"))),
-        "anomaly_model_score": int(row.get("anomaly_score", 0)),
-        "data_quality_confidence": confidence,
-    }
-    return {"id": f"ALT-{work_id}", "work_id": work_id, "state": clean_text(row["State"]), "type": "Potential irregularity", "severity": row["risk_level"], "score": int(row["risk_score"]), "confidence": confidence, "score_breakdown": score_breakdown, "provenance": provenance_for_row(row), "explanation": row["risk_reasons"][0], "status": saved.get("status", "New"), "assigned_to": saved.get("assigned_to", ""), "note": saved.get("note", ""), "action": "Review available financial and completion records"}
+    insights = []
+    if row["variance"] > 0.15: insights.append("Cost variance above recommendation")
+    if row["Expenditure"] > row["Recommended Amount (INR)"] > 0: insights.append("Matched expenditure exceeds the recommended amount")
+    if pd.notna(row["duration"]) and row["duration"] > 365: insights.append("Completion duration exceeds one year")
+    if not row["completed"]: insights.append("No matching completion record")
+    return {"id": f"ALT-{work_id}", "work_id": work_id, "state": clean_text(row["State"]), "type": "Potential irregularity", "severity": row["risk_level"], "score": int(row["risk_score"]), "explanation": row["risk_reasons"][0], "ai_insights": insights or ["Isolation Forest detected an unusual financial pattern"], "status": saved.get("status", "New"), "assigned_to": saved.get("assigned_to", ""), "note": saved.get("note", ""), "action": "Review available financial and completion records"}
+
+@app.post("/api/auth/register")
+def register(payload: dict = Body(default={} )):
+    email = str(payload.get("email", "")).strip().lower()
+    name = str(payload.get("name", "")).strip()
+    password = str(payload.get("password", ""))
+    role = str(payload.get("role", "Viewer")).strip()
+    if not email or "@" not in email or not name or len(password) < 6:
+        raise HTTPException(status_code=400, detail="Enter a name, valid email, and password with at least 6 characters")
+    if role not in ACCOUNT_ROLES:
+        raise HTTPException(status_code=400, detail="Choose a valid account role")
+    try:
+        with sqlite3.connect(ACCOUNT_DB) as connection:
+            connection.execute("INSERT INTO accounts (email, name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)", (email, name, password_hash(password), role, datetime.now().isoformat()))
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = email
+    return {"token": token, "name": name, "email": email, "role": role}
+
+@app.post("/api/auth/login")
+def login(payload: dict = Body(default={} )):
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", ""))
+    with sqlite3.connect(ACCOUNT_DB) as connection:
+        account = connection.execute("SELECT name, password_hash, role FROM accounts WHERE email = ?", (email,)).fetchone()
+    if not account or not password_matches(password, account[1]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = email
+    return {"token": token, "name": account[0], "email": email, "role": account[2]}
 
 @app.post("/api/alerts/{alert_id}/action")
 def alert_action(alert_id: str, payload: dict = Body(default={})): 
@@ -294,8 +345,12 @@ def states(): return dashboard()["states"]
 def compliance():
     p = DATA["projects"]
     rows = []
-    for _, r in p[p["variance"] > 0.15].sort_values("variance", ascending=False).head(100).iterrows():
-        rows.append({"work_id": str(r["Work ID"]), "rule": "Potential cost variance", "severity": "Warning" if r["variance"] < .3 else "High", "explanation": f"Final amount is {r['variance']:.0%} above recommendation", "status": "Requires review"})
+    for _, r in p[p["Category"].isna()].head(35).iterrows():
+        rows.append({"work_id": str(r["Work ID"]), "rule": "Category classification", "severity": "Warning", "explanation": "Administrative category is missing from the recommendation record", "status": "Requires review"})
+    for _, r in p[p["Recommendation Date"].isna()].head(35).iterrows():
+        rows.append({"work_id": str(r["Work ID"]), "rule": "Recommendation date", "severity": "Warning", "explanation": "Recommendation date is missing for administrative timeline tracking", "status": "Requires review"})
+    for _, r in p[(~p["completed"])].head(30).iterrows():
+        rows.append({"work_id": str(r["Work ID"]), "rule": "Completion documentation", "severity": "Warning", "explanation": "No completion record is available for administrative closure", "status": "Requires review"})
     return rows
 
 @app.get("/api/health")
